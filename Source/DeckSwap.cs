@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using LOR_DiceSystem;
@@ -65,6 +66,64 @@ namespace DeckOrdering
             AccessTools.FieldRefAccess<BookModel, DeckModel>("_deck");
         private static readonly MethodInfo SetHighlightedSlot = AccessTools.Method(typeof(UIOriginCardSlot), "SetHighlightedSlot");
 
+        private sealed class Press
+        {
+            internal readonly int Index;
+            internal readonly float Time;
+            internal readonly Vector2 Position;
+
+            internal Press(int index, float time, Vector2 position)
+            {
+                Index = index;
+                Time = time;
+                Position = position;
+            }
+
+            internal bool ShouldStartDrag(float now, Vector2 mouse) =>
+                now - Time >= LongPressSeconds || (mouse - Position).magnitude >= DragThresholdPixels;
+        }
+
+        private sealed class Drag
+        {
+            internal readonly GameObject Ghost;
+            internal readonly Vector3 GhostOffset;
+            internal readonly Canvas RootCanvas;
+            internal readonly Camera Camera;
+            internal readonly SwapArrow Arrow;
+            internal readonly int HoverIndex;
+
+            internal Drag(GameObject ghost, Vector3 ghostOffset, Canvas rootCanvas, Camera camera, SwapArrow arrow, int hoverIndex)
+            {
+                Ghost = ghost;
+                GhostOffset = ghostOffset;
+                RootCanvas = rootCanvas;
+                Camera = camera;
+                Arrow = arrow;
+                HoverIndex = hoverIndex;
+            }
+
+            internal Drag WithHover(int hoverIndex) => new Drag(Ghost, GhostOffset, RootCanvas, Camera, Arrow, hoverIndex);
+        }
+
+        private sealed class Sorting
+        {
+            internal readonly int LayerId;
+            internal readonly int Order;
+
+            internal Sorting(int layerId, int order)
+            {
+                LayerId = layerId;
+                Order = order;
+            }
+
+            private int LayerValue => SortingLayer.GetLayerValueFromID(LayerId);
+
+            internal bool IsAbove(Sorting other) =>
+                LayerValue > other.LayerValue || (LayerValue == other.LayerValue && Order > other.Order);
+
+            internal Sorting Raised(int amount) => new Sorting(LayerId, Math.Min(Order + amount, short.MaxValue - 1));
+        }
+
         private static bool anyDragging;
         private static int suppressUntilFrame = -1;
 
@@ -72,17 +131,8 @@ namespace DeckOrdering
         internal static bool IsDragging => anyDragging;
 
         private UIEquipDeckCardList list;
-        private int pressIndex = -1;
-        private float pressTime;
-        private Vector2 pressPosition;
-        private bool dragging;
-        private int hoverIndex = -1;
-
-        private GameObject ghost;
-        private Vector3 ghostOffset;
-        private Canvas rootCanvas;
-        private Camera canvasCamera;
-        private SwapArrow arrow;
+        private Press press;
+        private Drag drag;
 
         private void Awake()
         {
@@ -116,159 +166,156 @@ namespace DeckOrdering
             if (Input.GetMouseButtonDown(0))
             {
                 Cancel();
-                int index = SlotIndexAt(mouse);
-                if (index >= 0 && CanEdit())
-                {
-                    pressIndex = index;
-                    pressTime = Time.unscaledTime;
-                    pressPosition = mouse;
-                }
+                press = NewPress(SlotIndexAt(mouse), mouse);
                 return;
             }
 
-            if (pressIndex < 0)
+            if (press == null)
                 return;
 
             if (Input.GetMouseButton(0))
+                Hold(mouse);
+            else
+                Release(mouse);
+        }
+
+        private Press NewPress(int index, Vector2 mouse) =>
+            index >= 0 && CanEdit(list) ? new Press(index, Time.unscaledTime, mouse) : null;
+
+        private void Hold(Vector2 mouse)
+        {
+            if (drag != null)
             {
-                if (dragging)
-                    UpdateDrag(mouse);
-                else if (Time.unscaledTime - pressTime >= LongPressSeconds || (mouse - pressPosition).magnitude >= DragThresholdPixels)
-                    BeginDrag(mouse);
+                drag = UpdateDrag(drag, press.Index, mouse);
                 return;
             }
+            if (!press.ShouldStartDrag(Time.unscaledTime, mouse))
+                return;
+            drag = BeginDrag(press.Index, mouse);
+            anyDragging = drag != null;
+            if (drag == null)
+                press = null;
+        }
 
-            int source = pressIndex;
-            bool wasDragging = dragging;
-            int target = dragging ? SlotIndexAt(mouse) : -1;
+        private void Release(Vector2 mouse)
+        {
+            int source = press.Index;
+            bool wasDragging = drag != null;
+            int target = wasDragging ? SlotIndexAt(mouse) : -1;
             Cancel();
-            if (target >= 0 && target != source && CanEdit())
+            if (IsSwap(source, target) && CanEdit(list))
                 Swap(source, target);
 
             if (wasDragging)
                 Highlight(SlotIndexAt(mouse), true);
         }
 
-        private bool CanEdit()
-        {
-            UnitDataModel unit = list.currentunit;
-            if (unit?.bookItem == null || list.IsDisabled)
-                return false;
-            UIPhase phase = UI.UIController.Instance.CurrentUIPhase;
-            if (phase != UIPhase.Librarian_CardList && phase != UIPhase.BattleSetting)
-                return false;
-            if (list.rootPanel != null && list.rootPanel.IsLockBattleBluePrimary())
-                return false;
-            return !unit.bookItem.IsLockByBluePrimary();
-        }
+        private static bool IsSwap(int source, int target) => target >= 0 && target != source;
+
+        private static int TargetIndex(int hover, int source) => hover == source ? -1 : hover;
+
+        private static bool CanEdit(UIEquipDeckCardList list) => CanEdit(list, UI.UIController.Instance.CurrentUIPhase);
+
+        private static bool CanEdit(UIEquipDeckCardList list, UIPhase phase) =>
+            list.currentunit?.bookItem != null
+            && !list.IsDisabled
+            && (phase == UIPhase.Librarian_CardList || phase == UIPhase.BattleSetting)
+            && !(list.rootPanel != null && list.rootPanel.IsLockBattleBluePrimary())
+            && !list.currentunit.bookItem.IsLockByBluePrimary();
 
         private int SlotIndexAt(Vector2 screen)
         {
             List<UIOriginCardSlot> slots = SlotList(list);
-            int count = Math.Min(ViewList(list).Count, slots.Count);
-            for (int i = 0; i < count; i++)
-            {
-                UIOriginCardSlot slot = slots[i];
-                if (slot == null || !slot.gameObject.activeInHierarchy || slot.CardModel == null)
-                    continue;
-                RectTransform rt = (slot.selectable != null ? slot.selectable.transform : slot.transform) as RectTransform;
-                if (rt != null && RectTransformUtility.RectangleContainsScreenPoint(rt, screen, CameraFor(slot)))
-                    return i;
-            }
-            return -1;
+            return Enumerable.Range(0, Math.Min(ViewList(list).Count, slots.Count))
+                .Where(i => IsHit(slots[i], screen))
+                .DefaultIfEmpty(-1)
+                .First();
         }
+
+        private static bool IsHit(UIOriginCardSlot slot, Vector2 screen)
+        {
+            if (slot == null || !slot.gameObject.activeInHierarchy || slot.CardModel == null)
+                return false;
+            RectTransform rt = HitRect(slot);
+            return rt != null && RectTransformUtility.RectangleContainsScreenPoint(rt, screen, CameraFor(slot));
+        }
+
+        private static RectTransform HitRect(UIOriginCardSlot slot) =>
+            (slot.selectable != null ? slot.selectable.transform : slot.transform) as RectTransform;
 
         private static Camera CameraFor(Component c)
         {
             Canvas canvas = c.GetComponentInParent<Canvas>();
-            if (canvas == null)
-                return null;
-            Canvas root = canvas.rootCanvas;
-            return root.renderMode == RenderMode.ScreenSpaceOverlay ? null : root.worldCamera;
+            return canvas == null ? null : CameraOf(canvas.rootCanvas);
         }
 
-        private Vector3 ScreenToWorld(Vector2 screen)
+        private static Camera CameraOf(Canvas root) => root.renderMode == RenderMode.ScreenSpaceOverlay ? null : root.worldCamera;
+
+        private static Vector3 ScreenToWorld(Canvas root, Camera camera, Vector2 screen)
         {
-            RectTransformUtility.ScreenPointToWorldPointInRectangle((RectTransform)rootCanvas.transform, screen, canvasCamera, out Vector3 world);
+            RectTransformUtility.ScreenPointToWorldPointInRectangle((RectTransform)root.transform, screen, camera, out Vector3 world);
             return world;
         }
 
-        private void BeginDrag(Vector2 mouse)
+        private Drag BeginDrag(int index, Vector2 mouse)
         {
-            UIOriginCardSlot slot = SlotList(list)[pressIndex];
+            UIOriginCardSlot slot = SlotList(list)[index];
             Canvas canvas = slot.GetComponentInParent<Canvas>();
             if (canvas == null)
-            {
-                pressIndex = -1;
-                return;
-            }
+                return null;
 
-            dragging = true;
-            anyDragging = true;
-            rootCanvas = canvas.rootCanvas;
-            canvasCamera = CameraFor(slot);
+            Canvas root = canvas.rootCanvas;
+            Camera camera = CameraFor(slot);
             HideAllCardPreviews();
 
-            Highlight(pressIndex, true);
+            Highlight(index, true);
 
-            arrow = SwapArrow.Create(rootCanvas.transform);
+            SwapArrow arrow = SwapArrow.Create(root.transform);
+            GameObject ghost = CreateGhost(slot, root);
 
-            ghost = Instantiate(slot.gameObject, rootCanvas.transform, true);
+            Sorting top = TopSorting(root);
+            DrawOnTop(arrow.gameObject, top);
+            DrawOnTop(ghost, top.Raised(1));
+
+            Drag started = new Drag(ghost, slot.transform.position - ScreenToWorld(root, camera, mouse), root, camera, arrow, -1);
+            UISoundManager.instance.PlayEffectSound(UISoundType.Card_Over);
+            return UpdateDrag(started, index, mouse);
+        }
+
+        private static GameObject CreateGhost(UIOriginCardSlot slot, Canvas root)
+        {
+            GameObject ghost = Instantiate(slot.gameObject, root.transform, true);
             ghost.name = "DeckOrdering_DragGhost";
             ghost.transform.SetAsLastSibling();
-
-            FindTopSorting(out int topLayer, out int topOrder);
-            DrawOnTop(arrow.gameObject, topLayer, topOrder);
-            DrawOnTop(ghost, topLayer, topOrder + 1);
             foreach (Selectable s in ghost.GetComponentsInChildren<Selectable>(true))
                 Destroy(s);
             foreach (EventTrigger t in ghost.GetComponentsInChildren<EventTrigger>(true))
                 Destroy(t);
             foreach (UIOriginCardSlot s in ghost.GetComponentsInChildren<UIOriginCardSlot>(true))
                 s.enabled = false;
-            CanvasGroup ghostGroup = ghost.GetComponent<CanvasGroup>();
-            if (ghostGroup == null)
-                ghostGroup = ghost.AddComponent<CanvasGroup>();
-            ghostGroup.alpha = GhostAlpha;
-            ghostGroup.blocksRaycasts = false;
-            ghostGroup.interactable = false;
-            ghostOffset = slot.transform.position - ScreenToWorld(mouse);
-
-            UISoundManager.instance.PlayEffectSound(UISoundType.Card_Over);
-            UpdateDrag(mouse);
+            CanvasGroup existing = ghost.GetComponent<CanvasGroup>();
+            CanvasGroup group = existing != null ? existing : ghost.AddComponent<CanvasGroup>();
+            group.alpha = GhostAlpha;
+            group.blocksRaycasts = false;
+            group.interactable = false;
+            return ghost;
         }
 
-        private void FindTopSorting(out int layerId, out int order)
-        {
-            layerId = rootCanvas.sortingLayerID;
-            order = rootCanvas.sortingOrder;
-            int layerValue = SortingLayer.GetLayerValueFromID(layerId);
-            foreach (Canvas c in FindObjectsOfType<Canvas>())
-            {
-                if (!c.isActiveAndEnabled || !(c.isRootCanvas || c.overrideSorting))
-                    continue;
-                Canvas root = c.rootCanvas;
-                if (root.renderMode != rootCanvas.renderMode || root.worldCamera != rootCanvas.worldCamera)
-                    continue;
-                int value = SortingLayer.GetLayerValueFromID(c.sortingLayerID);
-                if (value > layerValue || (value == layerValue && c.sortingOrder > order))
-                {
-                    layerValue = value;
-                    layerId = c.sortingLayerID;
-                    order = c.sortingOrder;
-                }
-            }
-            order = Math.Min(order + 10, short.MaxValue - 1);
-        }
+        private static Sorting TopSorting(Canvas root) =>
+            FindObjectsOfType<Canvas>()
+                .Where(c => c.isActiveAndEnabled && (c.isRootCanvas || c.overrideSorting))
+                .Where(c => c.rootCanvas.renderMode == root.renderMode && c.rootCanvas.worldCamera == root.worldCamera)
+                .Select(c => new Sorting(c.sortingLayerID, c.sortingOrder))
+                .Aggregate(new Sorting(root.sortingLayerID, root.sortingOrder), (best, candidate) => candidate.IsAbove(best) ? candidate : best)
+                .Raised(10);
 
-        private static void DrawOnTop(GameObject go, int layerId, int order)
+        private static void DrawOnTop(GameObject go, Sorting sorting)
         {
-            Canvas canvas = go.GetComponent<Canvas>();
-            if (canvas == null)
-                canvas = go.AddComponent<Canvas>();
+            Canvas existing = go.GetComponent<Canvas>();
+            Canvas canvas = existing != null ? existing : go.AddComponent<Canvas>();
             canvas.overrideSorting = true;
-            canvas.sortingLayerID = layerId;
-            canvas.sortingOrder = order;
+            canvas.sortingLayerID = sorting.LayerId;
+            canvas.sortingOrder = sorting.Order;
         }
 
         private void HideAllCardPreviews()
@@ -280,34 +327,35 @@ namespace DeckOrdering
                 equipped.HideDetailSlotByInventory();
         }
 
-        private void UpdateDrag(Vector2 mouse)
+        private Drag UpdateDrag(Drag current, int source, Vector2 mouse)
         {
-            if (ghost != null)
-                ghost.transform.position = ScreenToWorld(mouse) + ghostOffset;
+            if (current.Ghost != null)
+                current.Ghost.transform.position = ScreenToWorld(current.RootCanvas, current.Camera, mouse) + current.GhostOffset;
 
-            int hover = SlotIndexAt(mouse);
-            if (hover == pressIndex)
-                hover = -1;
-            if (hover == hoverIndex)
-                return;
+            int hover = TargetIndex(SlotIndexAt(mouse), source);
+            if (hover == current.HoverIndex)
+                return current;
 
-            Highlight(hoverIndex, false);
-            hoverIndex = hover;
-            if (hoverIndex < 0)
+            Highlight(current.HoverIndex, false);
+            if (hover < 0)
             {
-                arrow?.Hide();
-                return;
+                if (current.Arrow != null)
+                    current.Arrow.Hide();
+                return current.WithHover(hover);
             }
 
-            Highlight(hoverIndex, true);
+            Highlight(hover, true);
             UISoundManager.instance.PlayEffectSound(UISoundType.Card_Over);
-            arrow?.Show(SlotCenter(pressIndex), SlotCenter(hoverIndex));
+            if (current.Arrow != null)
+                current.Arrow.Show(SlotCenter(source), SlotCenter(hover));
+            return current.WithHover(hover);
         }
 
-        private Vector3 SlotCenter(int index)
+        private Vector3 SlotCenter(int index) => Center(SlotList(list)[index]);
+
+        private static Vector3 Center(UIOriginCardSlot slot)
         {
-            UIOriginCardSlot slot = SlotList(list)[index];
-            RectTransform rt = (slot.selectable != null ? slot.selectable.transform : slot.transform) as RectTransform;
+            RectTransform rt = HitRect(slot);
             return rt != null ? rt.TransformPoint(rt.rect.center) : slot.transform.position;
         }
 
@@ -321,23 +369,28 @@ namespace DeckOrdering
 
         private void Cancel()
         {
-            if (dragging)
+            if (drag != null)
             {
-                Highlight(hoverIndex, false);
-                Highlight(pressIndex, false);
-                if (arrow != null)
-                    Destroy(arrow.gameObject);
-                if (ghost != null)
-                    Destroy(ghost);
+                Highlight(drag.HoverIndex, false);
+                Highlight(press?.Index ?? -1, false);
+                if (drag.Arrow != null)
+                    Destroy(drag.Arrow.gameObject);
+                if (drag.Ghost != null)
+                    Destroy(drag.Ghost);
                 suppressUntilFrame = Time.frameCount + 1;
             }
-            ghost = null;
-            arrow = null;
-            dragging = false;
+            drag = null;
+            press = null;
             anyDragging = false;
-            hoverIndex = -1;
-            pressIndex = -1;
         }
+
+        private static bool InRange(int a, int b, params int[] counts) => counts.All(count => a < count && b < count);
+
+        private static bool Matches(IReadOnlyList<DiceCardXmlInfo> cards, IReadOnlyList<DiceCardItemModel> view, int index) =>
+            cards[index].id == view[index].GetID();
+
+        private static IReadOnlyList<T> Swapped<T>(IReadOnlyList<T> items, int a, int b) =>
+            items.Select((item, i) => i == a ? items[b] : i == b ? items[a] : item).ToList();
 
         private void Swap(int a, int b)
         {
@@ -345,20 +398,25 @@ namespace DeckOrdering
             bool fixedDeck = book.IsFixedDeck();
             List<DiceCardXmlInfo> cards = fixedDeck ? book.GetCardListFromCurrentDeck() : CurrentDeck(book)?.GetCardList_nocopy();
             List<DiceCardItemModel> view = ViewList(list);
-            if (cards == null || a >= cards.Count || b >= cards.Count || a >= view.Count || b >= view.Count)
+            if (cards == null || !InRange(a, b, cards.Count, view.Count))
                 return;
-            if (cards[a].id != view[a].GetID() || cards[b].id != view[b].GetID())
+            if (!Matches(cards, view, a) || !Matches(cards, view, b))
             {
                 Debug.Log(Initializer.LogPrefix + "Deck editor order does not match the deck; not swapping.");
                 return;
             }
 
-            DiceCardXmlInfo temp = cards[a];
-            cards[a] = cards[b];
-            cards[b] = temp;
-
+            IReadOnlyList<DiceCardXmlInfo> swapped = Swapped(cards, a, b);
             if (fixedDeck)
-                FixedDeckOrderStore.Set(book, cards.ConvertAll(c => c.id));
+            {
+                FixedDeckOrderStore.Set(book, swapped.Select(card => card.id).ToList());
+            }
+            else
+            {
+                cards[a] = swapped[a];
+                cards[b] = swapped[b];
+            }
+
             list.changed = true;
             UISoundManager.instance.PlayEffectSound(UISoundType.Card_Apply);
             if (list.rootPanel != null)

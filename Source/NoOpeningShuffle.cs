@@ -17,9 +17,12 @@ namespace DeckOrdering
     [HarmonyPatch(typeof(BattleUnitModel), nameof(BattleUnitModel.SetUnitData))]
     internal static class OpeningDeckScopeForLibrarians
     {
+        private static bool IsLibrarian(BattleUnitModel unit, UnitBattleDataModel unitBattleData) =>
+            unit.faction == Faction.Player && unitBattleData?.unitData != null && unitBattleData.unitData.EnemyUnitId == -1;
+
         private static void Prefix(BattleUnitModel __instance, UnitBattleDataModel unitBattleData, out bool __state)
         {
-            __state = __instance.faction == Faction.Player && unitBattleData?.unitData != null && unitBattleData.unitData.EnemyUnitId == -1;
+            __state = IsLibrarian(__instance, unitBattleData);
             if (__state)
                 OpeningDeck.ScopeDepth++;
         }

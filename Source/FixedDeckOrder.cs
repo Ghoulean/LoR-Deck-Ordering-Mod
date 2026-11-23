@@ -1,10 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
+using System.Linq;
 using GameSave;
 using HarmonyLib;
 using LOR_DiceSystem;
-using UI;
 using UnityEngine;
 
 namespace DeckOrdering
@@ -17,75 +16,65 @@ namespace DeckOrdering
     {
         private const string SaveKey = "FixedDeckOrder";
 
-        private static Dictionary<LorId, List<LorId>> Read()
+        private sealed class Partition
         {
-            Dictionary<LorId, List<LorId>> result = new Dictionary<LorId, List<LorId>>();
-            SaveData root = ModSave.Get(SaveKey);
-            if (root == null || root.GetDataType() != SaveDataType.List)
-                return result;
-            foreach (SaveData entry in root)
+            internal readonly IReadOnlyList<DiceCardXmlInfo> Picked;
+            internal readonly IReadOnlyList<DiceCardXmlInfo> Remaining;
+
+            internal Partition(IReadOnlyList<DiceCardXmlInfo> picked, IReadOnlyList<DiceCardXmlInfo> remaining)
             {
-                if (entry.GetDataType() != SaveDataType.Dictionary)
-                    continue;
-                LorId book = ModSave.ToLorId(entry.GetData("book"));
-                SaveData cardsData = entry.GetData("cards");
-                if (book == null || cardsData == null || cardsData.GetDataType() != SaveDataType.List)
-                    continue;
-                List<LorId> cards = new List<LorId>();
-                foreach (SaveData card in cardsData)
-                {
-                    LorId id = ModSave.ToLorId(card);
-                    if (id != null)
-                        cards.Add(id);
-                }
-                result[book] = cards;
+                Picked = picked;
+                Remaining = remaining;
             }
-            return result;
+
+            internal Partition Take(LorId id)
+            {
+                int index = Remaining.ToList().FindIndex(c => c.id == id);
+                return index < 0
+                    ? this
+                    : new Partition(Picked.Concat(new[] { Remaining[index] }).ToList(), Remaining.Where((_, i) => i != index).ToList());
+            }
+
+            internal IReadOnlyList<DiceCardXmlInfo> Result => Picked.Concat(Remaining).ToList();
         }
 
-        private static void Write(Dictionary<LorId, List<LorId>> orders)
-        {
-            SaveData root = new SaveData();
-            foreach (KeyValuePair<LorId, List<LorId>> kv in orders)
-            {
-                SaveData cards = new SaveData(SaveDataType.List);
-                foreach (LorId card in kv.Value)
-                    cards.AddToList(ModSave.FromLorId(card));
-                SaveData entry = new SaveData();
-                entry.AddData("book", ModSave.FromLorId(kv.Key));
-                entry.AddData("cards", cards);
-                root.AddToList(entry);
-            }
-            ModSave.Set(SaveKey, root);
-        }
+        private static IReadOnlyDictionary<LorId, IReadOnlyList<LorId>> Read() => Parse(ModSave.Get(SaveKey));
 
-        internal static void Set(BookModel book, List<LorId> order)
+        private static IReadOnlyDictionary<LorId, IReadOnlyList<LorId>> Parse(SaveData root) =>
+            ModSave.Dictionaries(root)
+                .Select(entry => new KeyValuePair<LorId, SaveData>(ModSave.ToLorId(entry.GetData("book")), entry.GetData("cards")))
+                .Where(entry => entry.Key != null && entry.Value?.GetDataType() == SaveDataType.List)
+                .GroupBy(entry => entry.Key)
+                .ToDictionary(group => group.Key, group => ParseCards(group.Last().Value));
+
+        private static IReadOnlyList<LorId> ParseCards(SaveData cards) =>
+            ModSave.Items(cards).Select(ModSave.ToLorId).Where(id => id != null).ToList();
+
+        private static SaveData Serialize(IReadOnlyDictionary<LorId, IReadOnlyList<LorId>> orders) =>
+            ModSave.NonEmptyListOf(orders.Select(kv => ModSave.DictOf(
+                ModSave.Entry("book", ModSave.FromLorId(kv.Key)),
+                ModSave.Entry("cards", ModSave.ListOf(kv.Value.Select(ModSave.FromLorId))))));
+
+        private static IReadOnlyDictionary<LorId, IReadOnlyList<LorId>> With(
+            IReadOnlyDictionary<LorId, IReadOnlyList<LorId>> orders, LorId book, IReadOnlyList<LorId> order) =>
+            orders.Where(kv => !kv.Key.Equals(book))
+                .Concat(new[] { new KeyValuePair<LorId, IReadOnlyList<LorId>>(book, order) })
+                .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        internal static void Set(BookModel book, IReadOnlyList<LorId> order)
         {
             if (book?.ClassInfo == null)
                 return;
-            Dictionary<LorId, List<LorId>> orders = Read();
-            orders[book.ClassInfo.id] = order;
-            Write(orders);
+            ModSave.Set(SaveKey, Serialize(With(Read(), book.ClassInfo.id, order)));
         }
 
-        internal static void Apply(BookModel book, List<DiceCardXmlInfo> cards)
-        {
-            if (cards == null || cards.Count < 2 || book?.ClassInfo == null || !Read().TryGetValue(book.ClassInfo.id, out List<LorId> order))
-                return;
-            List<DiceCardXmlInfo> remaining = new List<DiceCardXmlInfo>(cards);
-            List<DiceCardXmlInfo> result = new List<DiceCardXmlInfo>(cards.Count);
-            foreach (LorId id in order)
-            {
-                int index = remaining.FindIndex(c => c.id == id);
-                if (index < 0)
-                    continue;
-                result.Add(remaining[index]);
-                remaining.RemoveAt(index);
-            }
-            result.AddRange(remaining);
-            cards.Clear();
-            cards.AddRange(result);
-        }
+        internal static IReadOnlyList<DiceCardXmlInfo> Apply(BookModel book, IReadOnlyList<DiceCardXmlInfo> cards) =>
+            cards == null || cards.Count < 2 || book?.ClassInfo == null || !Read().TryGetValue(book.ClassInfo.id, out IReadOnlyList<LorId> order)
+                ? cards
+                : Ordered(cards, order);
+
+        private static IReadOnlyList<DiceCardXmlInfo> Ordered(IReadOnlyList<DiceCardXmlInfo> cards, IEnumerable<LorId> order) =>
+            order.Aggregate(new Partition(new List<DiceCardXmlInfo>(), cards), (partition, id) => partition.Take(id)).Result;
     }
 
     // Overwrites the following BookModel methods:
@@ -98,35 +87,60 @@ namespace DeckOrdering
         internal static readonly AccessTools.FieldRef<BookModel, List<DeckModel>> DeckList =
             AccessTools.FieldRefAccess<BookModel, List<DeckModel>>("_deckList");
 
-        internal static List<DiceCardXmlInfo> FixedDeck(BookModel book)
+        private static readonly IComparer<DiceCardXmlInfo> ByCost = Comparer<DiceCardXmlInfo>.Create(SortUtil.CardInfoCompByCost);
+
+        internal static IEnumerable<DiceCardXmlInfo> FixedDeck(BookModel book) =>
+            FixedDeckOrderStore.Apply(book, XmlCards(Singleton<DeckXmlList>.Instance.GetData(book.ClassInfo.id)));
+
+        private static IReadOnlyList<DiceCardXmlInfo> XmlCards(DeckXmlInfo data) =>
+            (data?.cardIdList ?? Enumerable.Empty<LorId>())
+                .Select(cardId => ItemXmlDataList.instance.GetCardItem(cardId))
+                .Where(card => card != null)
+                .ToList();
+
+        internal static IEnumerable<DiceCardXmlInfo> CurrentDeckCards(BookModel book) =>
+            book.IsFixedDeck() ? FixedDeck(book) : CurrentDeck(book).GetAllCardList();
+
+        internal static IEnumerable<DiceCardXmlInfo> DeckCardsByIndex(BookModel book, int index) =>
+            book.IsFixedDeck() ? FixedDeck(book) : DeckList(book)[DeckIndex(index, book.IsMultiDeck(), DeckList(book).Count)].GetAllCardList();
+
+        private static int DeckIndex(int requested, bool multiDeck, int deckCount) =>
+            multiDeck && requested >= 0 && requested < deckCount ? requested : 0;
+
+        internal static IEnumerable<DiceCardXmlInfo> AllDeckCards(BookModel book) =>
+            book.IsFixedDeck() ? FixedDeck(book) : DeckList(book).SelectMany(deck => deck.GetAllCardList()).OrderBy(card => card, ByCost);
+
+        internal static bool Replace(string method, BookModel book, ref List<DiceCardXmlInfo> result, bool runOriginal,
+            Func<BookModel, IEnumerable<DiceCardXmlInfo>> cards)
         {
-            List<DiceCardXmlInfo> list = new List<DiceCardXmlInfo>();
-            DeckXmlInfo data = Singleton<DeckXmlList>.Instance.GetData(book.ClassInfo.id);
-            if (data != null)
+            if (!runOriginal)
             {
-                foreach (LorId cardId in data.cardIdList)
-                {
-                    DiceCardXmlInfo card = ItemXmlDataList.instance.GetCardItem(cardId);
-                    if (card != null)
-                        list.Add(card);
-                }
+                result = DeferToOtherMod(book, result);
+                return false;
             }
-            FixedDeckOrderStore.Apply(book, list);
-            return list;
+            try
+            {
+                result = cards(book).ToList();
+                return false;
+            }
+            catch (Exception e)
+            {
+                Debug.Log(Initializer.LogPrefix + method + " replacement failed: " + e);
+                return true;
+            }
         }
 
-        internal static bool DeferToOtherMod(BookModel book, List<DiceCardXmlInfo> result)
+        private static List<DiceCardXmlInfo> DeferToOtherMod(BookModel book, List<DiceCardXmlInfo> result)
         {
             try
             {
-                if (result != null && book.IsFixedDeck())
-                    FixedDeckOrderStore.Apply(book, result);
+                return result != null && book.IsFixedDeck() ? FixedDeckOrderStore.Apply(book, result).ToList() : result;
             }
             catch (Exception e)
             {
                 Debug.Log(Initializer.LogPrefix + "Failed to order another mod's deck result: " + e);
+                return result;
             }
-            return false;
         }
     }
 
@@ -134,83 +148,23 @@ namespace DeckOrdering
     [HarmonyPriority(Priority.Low)]
     internal static class ReplaceGetCardListFromCurrentDeck
     {
-        private static bool Prefix(BookModel __instance, ref List<DiceCardXmlInfo> __result, bool __runOriginal)
-        {
-            if (!__runOriginal)
-                return BookCardLists.DeferToOtherMod(__instance, __result);
-            try
-            {
-                __result = __instance.IsFixedDeck() ? BookCardLists.FixedDeck(__instance) : BookCardLists.CurrentDeck(__instance).GetAllCardList();
-                return false;
-            }
-            catch (Exception e)
-            {
-                Debug.Log(Initializer.LogPrefix + "GetCardListFromCurrentDeck replacement failed: " + e);
-                return true;
-            }
-        }
+        private static bool Prefix(BookModel __instance, ref List<DiceCardXmlInfo> __result, bool __runOriginal) =>
+            BookCardLists.Replace(nameof(BookModel.GetCardListFromCurrentDeck), __instance, ref __result, __runOriginal, BookCardLists.CurrentDeckCards);
     }
 
     [HarmonyPatch(typeof(BookModel), nameof(BookModel.GetCardListByIndex), new[] { typeof(int) })]
     [HarmonyPriority(Priority.Low)]
     internal static class ReplaceGetCardListByIndex
     {
-        private static bool Prefix(BookModel __instance, int index, ref List<DiceCardXmlInfo> __result, bool __runOriginal)
-        {
-            if (!__runOriginal)
-                return BookCardLists.DeferToOtherMod(__instance, __result);
-            try
-            {
-                if (__instance.IsFixedDeck())
-                {
-                    __result = BookCardLists.FixedDeck(__instance);
-                }
-                else
-                {
-                    List<DeckModel> decks = BookCardLists.DeckList(__instance);
-                    if (!__instance.IsMultiDeck() || index < 0 || index >= decks.Count)
-                        index = 0;
-                    __result = decks[index].GetAllCardList();
-                }
-                return false;
-            }
-            catch (Exception e)
-            {
-                Debug.Log(Initializer.LogPrefix + "GetCardListByIndex replacement failed: " + e);
-                return true;
-            }
-        }
+        private static bool Prefix(BookModel __instance, int index, ref List<DiceCardXmlInfo> __result, bool __runOriginal) =>
+            BookCardLists.Replace(nameof(BookModel.GetCardListByIndex), __instance, ref __result, __runOriginal, book => BookCardLists.DeckCardsByIndex(book, index));
     }
 
     [HarmonyPatch(typeof(BookModel), nameof(BookModel.GetCardListFromAllDeck))]
     [HarmonyPriority(Priority.Low)]
     internal static class ReplaceGetCardListFromAllDeck
     {
-        private static bool Prefix(BookModel __instance, ref List<DiceCardXmlInfo> __result, bool __runOriginal)
-        {
-            if (!__runOriginal)
-                return BookCardLists.DeferToOtherMod(__instance, __result);
-            try
-            {
-                if (__instance.IsFixedDeck())
-                {
-                    __result = BookCardLists.FixedDeck(__instance);
-                }
-                else
-                {
-                    List<DiceCardXmlInfo> list = new List<DiceCardXmlInfo>();
-                    foreach (DeckModel deck in BookCardLists.DeckList(__instance))
-                        list.AddRange(deck.GetAllCardList());
-                    list.Sort(SortUtil.CardInfoCompByCost);
-                    __result = list;
-                }
-                return false;
-            }
-            catch (Exception e)
-            {
-                Debug.Log(Initializer.LogPrefix + "GetCardListFromAllDeck replacement failed: " + e);
-                return true;
-            }
-        }
+        private static bool Prefix(BookModel __instance, ref List<DiceCardXmlInfo> __result, bool __runOriginal) =>
+            BookCardLists.Replace(nameof(BookModel.GetCardListFromAllDeck), __instance, ref __result, __runOriginal, BookCardLists.AllDeckCards);
     }
 }

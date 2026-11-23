@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using HarmonyLib;
 using TMPro;
 using UI;
@@ -42,7 +43,7 @@ namespace DeckOrdering
         private static readonly AccessTools.FieldRef<UIEquipDeckCardList, GameObject> MultiDeckLayout =
             AccessTools.FieldRefAccess<UIEquipDeckCardList, GameObject>("multiDeckLayout");
 
-        private readonly List<Image> backgrounds = new List<Image>();
+        private IReadOnlyList<Image> backgrounds = new Image[0];
         private BookModel book;
         private UIEquipDeckCardList list;
 
@@ -52,60 +53,73 @@ namespace DeckOrdering
             if (layout == null)
                 return null;
             OpeningStanceButtons existing = layout.GetComponentInChildren<OpeningStanceButtons>(true);
-            if (existing != null)
-                return existing;
+            return existing != null ? existing : Create(list, layout);
+        }
 
+        private static OpeningStanceButtons Create(UIEquipDeckCardList list, GameObject layout)
+        {
             TextMeshProUGUI sampleText = list.GetComponentInChildren<TextMeshProUGUI>(true);
+            TMP_FontAsset font = sampleText != null ? sampleText.font : null;
 
             GameObject row = new GameObject("DeckOrdering_OpeningStance", typeof(RectTransform));
             row.transform.SetParent(layout.transform, false);
-            RectTransform rt = (RectTransform)row.transform;
-            rt.anchorMin = new Vector2(0f, 1f);
-            rt.anchorMax = new Vector2(0f, 1f);
-            rt.pivot = new Vector2(0f, 0f);
-            rt.anchoredPosition = RowOffset;
-            rt.sizeDelta = new Vector2(Labels.Length * (ButtonWidth + Gap), ButtonHeight);
+            Place((RectTransform)row.transform, new Vector2(0f, 1f), new Vector2(0f, 0f), RowOffset,
+                new Vector2(Labels.Length * (ButtonWidth + Gap), ButtonHeight));
 
             OpeningStanceButtons buttons = row.AddComponent<OpeningStanceButtons>();
-            for (int i = 0; i < Labels.Length; i++)
-                buttons.AddButton(i, sampleText != null ? sampleText.font : null);
+            buttons.backgrounds = Labels.Select((label, index) => buttons.CreateButton(index, label, font)).ToList();
             return buttons;
         }
 
-        private void AddButton(int index, TMP_FontAsset font)
+        private static void Place(RectTransform rt, Vector2 anchor, Vector2 pivot, Vector2 position, Vector2 size)
         {
-            GameObject go = new GameObject(Labels[index], typeof(RectTransform), typeof(Image), typeof(Button));
+            rt.anchorMin = anchor;
+            rt.anchorMax = anchor;
+            rt.pivot = pivot;
+            rt.anchoredPosition = position;
+            rt.sizeDelta = size;
+        }
+
+        private static void Stretch(RectTransform rt)
+        {
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+        }
+
+        private static int? StanceForButton(int index) => index == 0 ? (int?)null : index - 1;
+
+        private static int ButtonForStance(int? stance) => stance.HasValue ? stance.Value + 1 : 0;
+
+        private static Color ColorFor(int index, int selected) => index == selected ? Selected : Normal;
+
+        private Image CreateButton(int index, string text, TMP_FontAsset font)
+        {
+            GameObject go = new GameObject(text, typeof(RectTransform), typeof(Image), typeof(Button));
             go.transform.SetParent(transform, false);
-            RectTransform rt = (RectTransform)go.transform;
-            rt.anchorMin = new Vector2(0f, 0.5f);
-            rt.anchorMax = new Vector2(0f, 0.5f);
-            rt.pivot = new Vector2(0f, 0.5f);
-            rt.anchoredPosition = new Vector2(index * (ButtonWidth + Gap), 0f);
-            rt.sizeDelta = new Vector2(ButtonWidth, ButtonHeight);
+            Place((RectTransform)go.transform, new Vector2(0f, 0.5f), new Vector2(0f, 0.5f),
+                new Vector2(index * (ButtonWidth + Gap), 0f), new Vector2(ButtonWidth, ButtonHeight));
 
             Image image = go.GetComponent<Image>();
             image.color = Normal;
-            backgrounds.Add(image);
 
-            int? stance = index == 0 ? (int?)null : index - 1;
+            int? stance = StanceForButton(index);
             go.GetComponent<Button>().onClick.AddListener(() => Select(stance));
 
             GameObject labelGo = new GameObject("Label", typeof(RectTransform));
             labelGo.transform.SetParent(go.transform, false);
-            RectTransform labelRt = (RectTransform)labelGo.transform;
-            labelRt.anchorMin = Vector2.zero;
-            labelRt.anchorMax = Vector2.one;
-            labelRt.offsetMin = Vector2.zero;
-            labelRt.offsetMax = Vector2.zero;
+            Stretch((RectTransform)labelGo.transform);
 
             TextMeshProUGUI label = labelGo.AddComponent<TextMeshProUGUI>();
             if (font != null)
                 label.font = font;
-            label.text = Labels[index];
+            label.text = text;
             label.fontSize = FontSize;
             label.alignment = TextAlignmentOptions.Center;
             label.color = Color.white;
             label.raycastTarget = false;
+            return image;
         }
 
         internal void Bind(UIEquipDeckCardList owner, BookModel newBook)
@@ -131,10 +145,9 @@ namespace DeckOrdering
 
         private void Recolor()
         {
-            int? stance = OpeningStanceStore.Get(book);
-            int selected = stance.HasValue ? stance.Value + 1 : 0;
-            for (int i = 0; i < backgrounds.Count; i++)
-                backgrounds[i].color = i == selected ? Selected : Normal;
+            int selected = ButtonForStance(OpeningStanceStore.Get(book));
+            foreach (var button in backgrounds.Select((image, index) => new { image, color = ColorFor(index, selected) }))
+                button.image.color = button.color;
         }
     }
 }
