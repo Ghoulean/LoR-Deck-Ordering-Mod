@@ -10,27 +10,22 @@ using UnityEngine;
 namespace DeckOrdering
 {
     // Purple Tear stance save layout
-	// Saved under CustomStorage["Gh-LoRDeckOrderingMod-OpeningStance"] as
-    //   [ { "book": <key page instanceId>, "stance": 0-3 }, ... ]
-	// (pretty sure only PT will use this but this is keypage ID agnostic)
-	// If unset, defaults to random stance on Act start
-
+    // One key per key page:
+    //   CustomStorage["Gh-LoRDeckOrderingMod-OpeningStance:<key page instanceId>"] = 0-3
+    // (pretty sure only PT will use this but this is keypage ID agnostic)
+    // If unset, defaults to random stance on Act start
     internal static class OpeningStanceStore
     {
         private const string SaveKey = "OpeningStance";
 
-        private static IReadOnlyDictionary<int, int> Read()
+        private static string Name(BookModel book)
         {
-            return Parse(ModSave.Get(SaveKey));
+            return Name(book.instanceId);
         }
 
-        private static IReadOnlyDictionary<int, int> Parse(SaveData root)
+        private static string Name(int bookInstanceId)
         {
-            return ModSave.Dictionaries(root)
-                .Select(entry => new { Book = ModSave.IntOf(entry.GetData("book")), Stance = ModSave.IntOf(entry.GetData("stance")) })
-                .Where(entry => entry.Book.HasValue && IsValidStance(entry.Stance))
-                .GroupBy(entry => entry.Book.Value)
-                .ToDictionary(group => group.Key, group => group.Last().Stance.Value);
+            return SaveKey + ":" + bookInstanceId;
         }
 
         private static bool IsValidStance(int? stance)
@@ -38,23 +33,15 @@ namespace DeckOrdering
             return stance.HasValue && stance.Value >= 0 && stance.Value <= 3;
         }
 
-        private static SaveData Serialize(IReadOnlyDictionary<int, int> stances)
-        {
-            return ModSave.NonEmptyListOf(stances.Select(kv => ModSave.DictOf(
-                ModSave.Entry("book", new SaveData(kv.Key)),
-                ModSave.Entry("stance", new SaveData(kv.Value)))));
-        }
-
-        private static IReadOnlyDictionary<int, int> With(IReadOnlyDictionary<int, int> stances, int book, int? stance)
-        {
-            return stances.Where(kv => kv.Key != book)
-                .Concat(stance.HasValue ? new[] { new KeyValuePair<int, int>(book, stance.Value) } : Enumerable.Empty<KeyValuePair<int, int>>())
-                .ToDictionary(kv => kv.Key, kv => kv.Value);
-        }
-
         internal static int? Get(BookModel book)
         {
-            return book != null && Read().TryGetValue(book.instanceId, out int stance) ? stance : (int?)null;
+            if (book == null)
+            {
+                return null;
+            }
+
+            int? stance = ModSave.IntOf(ModSave.Get(Name(book)));
+            return IsValidStance(stance) ? stance : null;
         }
 
         internal static void Set(BookModel book, int? stance)
@@ -64,7 +51,7 @@ namespace DeckOrdering
                 return;
             }
 
-            ModSave.Set(SaveKey, Serialize(With(Read(), book.instanceId, stance)));
+            ModSave.Set(Name(book), IsValidStance(stance) ? new SaveData(stance.Value) : null);
         }
     }
 
