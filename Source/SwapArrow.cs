@@ -68,14 +68,18 @@ namespace DeckOrdering
         {
             vh.Clear();
             foreach (Shape shape in Shapes(from, to))
+            {
                 Emit(vh, shape);
+            }
         }
 
         private static IEnumerable<Shape> Shapes(Vector2 from, Vector2 to)
         {
             float distance = Vector2.Distance(from, to);
             if (distance < 1f)
+            {
                 return Enumerable.Empty<Shape>();
+            }
 
             IReadOnlyList<Vector2> points = Curve(from, to, distance);
             Vector2 endDir = (points[NumPoints - 1] - points[NumPoints - 2]).normalized;
@@ -106,8 +110,10 @@ namespace DeckOrdering
             return normal.y < 0f || (normal.y == 0f && normal.x > 0f) ? -normal : normal;
         }
 
-        private static IReadOnlyList<Vector2> Shaft(IEnumerable<Vector2> points, Vector2 from, Vector2 to, float trim) =>
-            points.Where(p => Vector2.Distance(p, from) >= trim && Vector2.Distance(p, to) >= trim).ToList();
+        private static IReadOnlyList<Vector2> Shaft(IEnumerable<Vector2> points, Vector2 from, Vector2 to, float trim)
+        {
+            return points.Where(p => Vector2.Distance(p, from) >= trim && Vector2.Distance(p, to) >= trim).ToList();
+        }
 
         private static Vector2 Bezier(float t, Vector2 p0, Vector2 p1, Vector2 p2)
         {
@@ -115,12 +121,18 @@ namespace DeckOrdering
             return u * u * p0 + 2f * u * t * p1 + t * t * p2;
         }
 
-        private static Vector2 Perpendicular(Vector2 v) => new Vector2(-v.y, v.x);
+        private static Vector2 Perpendicular(Vector2 v)
+        {
+            return new Vector2(-v.y, v.x);
+        }
 
         private static Shape Strip(IReadOnlyList<Vector2> pts, float width, Color color)
         {
             if (pts.Count < 2)
+            {
                 return Shape.Empty;
+            }
+
             float half = width * 0.5f;
             IReadOnlyList<Vector2> vertices = pts.SelectMany((p, i) =>
             {
@@ -144,9 +156,14 @@ namespace DeckOrdering
         {
             int start = vh.currentVertCount;
             foreach (Vector2 vertex in shape.Vertices)
+            {
                 vh.AddVert(vertex, shape.Color, Vector2.zero);
+            }
+
             for (int i = 0; i + 2 < shape.Triangles.Count; i += 3)
+            {
                 vh.AddTriangle(start + shape.Triangles[i], start + shape.Triangles[i + 1], start + shape.Triangles[i + 2]);
+            }
         }
     }
 }

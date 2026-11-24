@@ -1,0 +1,9 @@
+root = true
+
+[*.cs]
+# Block bodies ({ ... }) for named functions; => only for lambdas.
+csharp_style_expression_bodied_methods = false:warning
+csharp_style_expression_bodied_constructors = false:warning
+csharp_style_expression_bodied_operators = false:warning
+csharp_style_expression_bodied_local_functions = false:warning
+csharp_prefer_braces = true:warning

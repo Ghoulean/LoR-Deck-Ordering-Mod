@@ -18,7 +18,9 @@ namespace DeckOrdering
             {
                 OpeningStanceButtons buttons = OpeningStanceButtons.Ensure(__instance);
                 if (buttons != null)
+                {
                     buttons.Bind(__instance, __instance.currentunit?.bookItem);
+                }
             }
             catch (Exception e)
             {
@@ -40,8 +42,8 @@ namespace DeckOrdering
         private static readonly Color Normal = new Color(0.15f, 0.12f, 0.1f, 0.85f);
         private static readonly Color Selected = new Color(0.55f, 0.3f, 0.75f, 0.95f);
 
-        private static readonly AccessTools.FieldRef<UIEquipDeckCardList, GameObject> MultiDeckLayout =
-            AccessTools.FieldRefAccess<UIEquipDeckCardList, GameObject>("multiDeckLayout");
+        private static readonly Func<UIEquipDeckCardList, GameObject> MultiDeckLayout =
+            Reflect.FieldGetter<UIEquipDeckCardList, GameObject>("multiDeckLayout");
 
         private IReadOnlyList<Image> backgrounds = new Image[0];
         private BookModel book;
@@ -51,7 +53,10 @@ namespace DeckOrdering
         {
             GameObject layout = MultiDeckLayout(list);
             if (layout == null)
+            {
                 return null;
+            }
+
             OpeningStanceButtons existing = layout.GetComponentInChildren<OpeningStanceButtons>(true);
             return existing != null ? existing : Create(list, layout);
         }
@@ -88,11 +93,20 @@ namespace DeckOrdering
             rt.offsetMax = Vector2.zero;
         }
 
-        private static int? StanceForButton(int index) => index == 0 ? (int?)null : index - 1;
+        private static int? StanceForButton(int index)
+        {
+            return index == 0 ? (int?)null : index - 1;
+        }
 
-        private static int ButtonForStance(int? stance) => stance.HasValue ? stance.Value + 1 : 0;
+        private static int ButtonForStance(int? stance)
+        {
+            return stance.HasValue ? stance.Value + 1 : 0;
+        }
 
-        private static Color ColorFor(int index, int selected) => index == selected ? Selected : Normal;
+        private static Color ColorFor(int index, int selected)
+        {
+            return index == selected ? Selected : Normal;
+        }
 
         private Image CreateButton(int index, string text, TMP_FontAsset font)
         {
@@ -113,7 +127,10 @@ namespace DeckOrdering
 
             TextMeshProUGUI label = labelGo.AddComponent<TextMeshProUGUI>();
             if (font != null)
+            {
                 label.font = font;
+            }
+
             label.text = text;
             label.fontSize = FontSize;
             label.alignment = TextAlignmentOptions.Center;
@@ -129,16 +146,24 @@ namespace DeckOrdering
             bool show = PurpleTear.IsPurpleTear(book);
             gameObject.SetActive(show);
             if (show)
+            {
                 Recolor();
+            }
         }
 
         private void Select(int? stance)
         {
             if (book == null)
+            {
                 return;
+            }
+
             OpeningStanceStore.Set(book, stance);
             if (list != null)
+            {
                 list.changed = true;
+            }
+
             UISoundManager.instance.PlayEffectSound(UISoundType.Card_Apply);
             Recolor();
         }
@@ -147,7 +172,9 @@ namespace DeckOrdering
         {
             int selected = ButtonForStance(OpeningStanceStore.Get(book));
             foreach (var button in backgrounds.Select((image, index) => new { image, color = ColorFor(index, selected) }))
+            {
                 button.image.color = button.color;
+            }
         }
     }
 }

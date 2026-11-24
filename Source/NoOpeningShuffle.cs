@@ -10,27 +10,34 @@ namespace DeckOrdering
         internal static int ScopeDepth;
         internal static bool InInit;
 
-        internal static readonly AccessTools.FieldRef<BattleAllyCardDetail, List<BattleDiceCardModel>> CardInDeck =
-            AccessTools.FieldRefAccess<BattleAllyCardDetail, List<BattleDiceCardModel>>("_cardInDeck");
+        internal static readonly Func<BattleAllyCardDetail, List<BattleDiceCardModel>> CardInDeck =
+            Reflect.FieldGetter<BattleAllyCardDetail, List<BattleDiceCardModel>>("_cardInDeck");
     }
 
     [HarmonyPatch(typeof(BattleUnitModel), nameof(BattleUnitModel.SetUnitData))]
     internal static class OpeningDeckScopeForLibrarians
     {
-        private static bool IsLibrarian(BattleUnitModel unit, UnitBattleDataModel unitBattleData) =>
-            unit.faction == Faction.Player && unitBattleData?.unitData != null && unitBattleData.unitData.EnemyUnitId == -1;
+        private static bool IsLibrarian(BattleUnitModel unit, UnitBattleDataModel unitBattleData)
+        {
+            return unit.faction == Faction.Player && unitBattleData?.unitData != null && unitBattleData.unitData.EnemyUnitId == -1;
+        }
 
         private static void Prefix(BattleUnitModel __instance, UnitBattleDataModel unitBattleData, out bool __state)
         {
             __state = IsLibrarian(__instance, unitBattleData);
             if (__state)
+            {
                 OpeningDeck.ScopeDepth++;
+            }
         }
 
         private static Exception Finalizer(Exception __exception, bool __state)
         {
             if (__state)
+            {
                 OpeningDeck.ScopeDepth--;
+            }
+
             return __exception;
         }
     }
@@ -38,7 +45,10 @@ namespace DeckOrdering
     [HarmonyPatch(typeof(BattleAllyCardDetail), nameof(BattleAllyCardDetail.Init))]
     internal static class TrackInit
     {
-        private static void Prefix(List<DiceCardXmlInfo> deck) => OpeningDeck.InInit = OpeningDeck.ScopeDepth > 0;
+        private static void Prefix(List<DiceCardXmlInfo> deck)
+        {
+            OpeningDeck.InInit = OpeningDeck.ScopeDepth > 0;
+        }
 
         private static Exception Finalizer(Exception __exception)
         {
@@ -53,7 +63,10 @@ namespace DeckOrdering
         private static bool Prefix(BattleAllyCardDetail __instance)
         {
             if (!OpeningDeck.InInit)
+            {
                 return true;
+            }
+
             OpeningDeck.CardInDeck(__instance).Reverse();
             return false;
         }
